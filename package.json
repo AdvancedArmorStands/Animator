@@ -1,7 +1,8 @@
 {
-  "name": "armor-stand-animator",
+  "homepage": "https://animate.advancedarmorstands.ir",
+  "name": "As Animator",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
