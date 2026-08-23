@@ -197,7 +197,7 @@ function NumberField({ value, onChange, accent, disabled, onDragStart }) {
     const dx = e.clientX - d.startX;
     if (Math.abs(dx) > 2) d.moved = true;
     if (d.moved) {
-      const mult = e.shiftKey ? 0.1 : 0.5;
+      const mult = e.shiftKey ? 0.1 : 1;
       onChange(round1(d.startVal + dx * mult));
     }
   };
