@@ -2562,17 +2562,7 @@ export default function App() {
       case 'toggleSettingsPanel': setShowRight((s) => !s); break;
       case 'resetLayout': resetLayout(); break;
       case 'openDocs':
-        setModal({
-          kind: 'info',
-          title: 'Plugin documentation',
-          body: (
-            <>
-              Full config reference for AdvancedArmorStands, including the animations.yml schema this editor writes to:
-              <br />
-              <a href="https://docs.advancedarmorstands.ir/" target="_blank" rel="noopener noreferrer">docs.advancedarmorstands.ir</a>
-            </>
-          ),
-        });
+        window.open('https://docs.advancedarmorstands.ir/', '_blank', 'noopener,noreferrer');
         break;
       case 'shortcuts':
         setModal({
@@ -2602,7 +2592,7 @@ export default function App() {
         setModal({
           kind: 'info',
           title: 'About AS Animator',
-          body: 'A pose and timeline editor for AdvancedArmorStands. Build a pose per step, scrub the timeline, and export straight to animations.yml.',
+          body: 'The official pose and timeline editor for AdvancedArmorStands. Build a pose per step, scrub the timeline, and export straight to animations.yml.',
         });
         break;
       default: break;
