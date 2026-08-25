@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AdvancedArmorStands — embed test</title>
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #101010; color: #ddd; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 10px 16px; background: #1b1b1b; border-bottom: 1px solid #000; font-size: 13px; }
+  header code { color: #8fb8ef; }
+  main { flex: 1; display: flex; min-height: 0; }
+  iframe { flex: 1; border: none; }
+  aside { width: 340px; flex-shrink: 0; background: #161616; border-left: 1px solid #000; display: flex; flex-direction: column; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #888; margin: 0; padding: 10px 12px; border-bottom: 1px solid #262626; }
+  #log { flex: 1; overflow-y: auto; padding: 10px 12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.6; white-space: pre-wrap; color: #9ecf9e; }
+  .hint { padding: 8px 12px; font-size: 11px; color: #777; border-top: 1px solid #262626; }
+</style>
+</head>
+<body>
+<header>
+  Host page simulation — the iframe loads <code>/?embed</code>. Every pose change inside it is reported below via <code>postMessage</code>.
+</header>
+<main>
+  <iframe id="embed" src="/?embed" allowtransparency="true"></iframe>
+  <aside>
+    <h2>Live pose events</h2>
+    <div id="log"></div>
+    <div class="hint">Dragging a value (e.g. Head X +20) should print one line per unit of change.</div>
+  </aside>
+</main>
+<script>
+  const log = document.getElementById('log');
+  let count = 0;
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || d.source !== 'advanced-armor-stands') return;
+    count += 1;
+    let line;
+    if (d.type === 'aas-pose-change') {
+      line = `#${count} ${d.part}.${d.axis} ${d.delta > 0 ? '+1' : '-1'} -> now ${d.value}`;
+    } else if (d.type === 'aas-pose') {
+      const p = d.pose;
+      line = `#${count} FULL POSE (step ${d.selectedStep}) | head ${p.head.x}/${p.head.y}/${p.head.z}`
+        + ` | arms ${p.left_arm.x}/${p.left_arm.y}/${p.left_arm.z} & ${p.right_arm.x}/${p.right_arm.y}/${p.right_arm.z}`
+        + ` | legs ${p.left_leg.x} & ${p.right_leg.x}`;
+    } else {
+      return;
+    }
+    log.textContent += line + '\n';
+    log.scrollTop = log.scrollHeight;
+  });
+</script>
+</body>
+</html>

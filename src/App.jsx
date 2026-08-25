@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import {
   Play, Pause, Plus, Trash2, Copy, Download, ChevronDown, ChevronRight, ChevronLeft,
   Lock, Unlock, Eye, EyeOff, MousePointer2, ZoomIn, ZoomOut, SkipBack, SkipForward,
-  StepBack, StepForward, Repeat, Maximize2, Minimize2, Timer, RotateCcw, Settings2, Grid3x3, Check, CornerDownRight, Save, HelpCircle, HardDrive,
+  StepBack, StepForward, Repeat, Maximize2, Minimize2, Timer, RotateCcw, Settings2, Grid3x3, Check, CornerDownRight, Save, HelpCircle, HardDrive, Sun, Box,
 } from 'lucide-react';
 
 /* ------------------------------------------------------------------ */
@@ -243,7 +243,63 @@ function NumberField({ value, onChange, accent, disabled, onDragStart }) {
 /*  3D viewport                                                       */
 /* ------------------------------------------------------------------ */
 
-const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) {
+function mulberry32(seed) {
+  return () => {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* Paints a 16x16 canvas in the style of vanilla Minecraft block textures
+   (per-pixel value jitter, hard plank seams) and returns it as a crisp
+   nearest-neighbour THREE texture. */
+function makeMcTexture(kind) {
+  const c = document.createElement('canvas');
+  c.width = 16;
+  c.height = 16;
+  const ctx = c.getContext('2d');
+  const rng = mulberry32(kind === 'stone' ? 1337 : kind === 'birchDark' ? 42 : 7);
+
+  let r; let g; let b; let jitter;
+  if (kind === 'stone') { [r, g, b, jitter] = [127, 127, 127, 16]; } else if (kind === 'birchDark') { [r, g, b, jitter] = [166, 152, 109, 10]; } else { [r, g, b, jitter] = [199, 186, 141, 12]; } // birch planks
+
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const n = Math.floor((rng() - 0.5) * 2 * jitter);
+      ctx.fillStyle = `rgb(${r + n},${g + n},${b + n})`;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  if (kind !== 'stone') {
+    // horizontal plank seams every 4px + short birch bark dashes
+    ctx.fillStyle = 'rgba(96,86,58,0.9)';
+    for (const yy of [0, 4, 8, 12]) ctx.fillRect(0, yy, 16, 1);
+    ctx.fillStyle = 'rgba(70,62,44,0.85)';
+    for (let i = 0; i < 7; i++) {
+      const xx = Math.floor(rng() * 14);
+      const yy = Math.floor(rng() * 15);
+      ctx.fillRect(xx, yy, 2, 1);
+    }
+  } else {
+    // stone speckles
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    for (let i = 0; i < 10; i++) ctx.fillRect(Math.floor(rng() * 16), Math.floor(rng() * 16), 1, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    for (let i = 0; i < 10; i++) ctx.fillRect(Math.floor(rng() * 16), Math.floor(rng() * 16), 1, 1);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const Viewport = forwardRef(function Viewport({ initialShowGrid, initialShowShadows, initialRealistic, locked }, ref) {
   const lockedRef = useRef(locked);
   useEffect(() => { lockedRef.current = locked; }, [locked]);
   const mountRef = useRef(null);
@@ -252,22 +308,47 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
   useImperativeHandle(ref, () => ({
     setPose(pose) {
       const s = stateRef.current;
-      if (!s.joints || !pose) return;
-      PARTS.forEach((part) => {
-        const g = s.joints[part];
-        const p = pose[part];
-        if (g && p) {
-          g.rotation.set(
-            THREE.MathUtils.degToRad(p.x),
-            THREE.MathUtils.degToRad(p.y),
-            THREE.MathUtils.degToRad(p.z),
-          );
-        }
-      });
+      if (!pose) return;
+      const apply = (joints) => {
+        if (!joints) return;
+        PARTS.forEach((part) => {
+          const g = joints[part];
+          const p = pose[part];
+          if (g && p) {
+            g.rotation.set(
+              THREE.MathUtils.degToRad(p.x),
+              THREE.MathUtils.degToRad(p.y),
+              THREE.MathUtils.degToRad(p.z),
+            );
+          }
+        });
+      };
+      apply(s.joints);
+      apply(s.jointsClassic);
     },
     setGridVisible(v) {
       const s = stateRef.current;
       if (s.grid) s.grid.visible = v;
+    },
+    setShadowsEnabled(v) {
+      const s = stateRef.current;
+      if (!s.renderer || !s.keyLight || !s.ground) return;
+      s.renderer.shadowMap.enabled = v;
+      s.keyLight.castShadow = v;
+      s.ground.visible = v;
+      // materials compiled with/without shadow support must be flushed on toggle
+      s.scene.traverse((o) => { if (o.material) o.material.needsUpdate = true; });
+    },
+    setRealisticModel(v) {
+      const s = stateRef.current;
+      if (!s.realGroup || !s.classicGroup || !s.jointsClassic) return;
+      s.realGroup.visible = v;
+      s.classicGroup.visible = !v;
+      // raise the orbit focus a touch so the taller vanilla-style stand fits
+      if (s.target && s.updateCamera) {
+        s.target.y = v ? 1.0 : 0.75;
+        s.updateCamera();
+      }
     },
     resetView() {
       const s = stateRef.current;
@@ -292,7 +373,7 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height);
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = initialShowShadows !== false;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mount.appendChild(renderer.domElement);
 
@@ -300,7 +381,7 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
     scene.add(hemi);
     const key = new THREE.DirectionalLight(0xfff2e0, 1.15);
     key.position.set(2.4, 4, 2.2);
-    key.castShadow = true;
+    key.castShadow = initialShowShadows !== false;
     key.shadow.mapSize.set(1024, 1024);
     key.shadow.camera.left = -2;
     key.shadow.camera.right = 2;
@@ -320,13 +401,33 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
     );
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
+    ground.visible = initialShowShadows !== false;
     scene.add(ground);
 
+    /* --- Two stand models: "classic" (original boxes) and "realistic"
+           (pixel-art vanilla-style). Toggled from the settings menu. ------- */
+    const PX = 1 / 16;
+    const texWood = makeMcTexture('birch');
+    const texWoodDark = makeMcTexture('birchDark');
+    const texStone = makeMcTexture('stone');
+    const matWood = new THREE.MeshStandardMaterial({ map: texWood, roughness: 0.9 });
+    const matWoodDark = new THREE.MeshStandardMaterial({ map: texWoodDark, roughness: 0.95 });
+    const matStone = new THREE.MeshStandardMaterial({ map: texStone, roughness: 1 });
     const matBody = new THREE.MeshStandardMaterial({ color: 0xd8d6cd, roughness: 0.85, flatShading: true });
-    const matDark = new THREE.MeshStandardMaterial({ color: 0x2a2b2f, roughness: 0.7, flatShading: true });
-    const matWood = new THREE.MeshStandardMaterial({ color: 0x8a6a3d, roughness: 0.9, flatShading: true });
+    const matDarkC = new THREE.MeshStandardMaterial({ color: 0x2a2b2f, roughness: 0.7, flatShading: true });
+    const matWoodC = new THREE.MeshStandardMaterial({ color: 0x8a6a3d, roughness: 0.9, flatShading: true });
     const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.18 });
 
+    // MC boxes are textured per-face in vanilla; we approximate by tiling the
+    // texture so each world unit maps to whole pixels (repeat = size / 16px).
+    function mcBox(wPx, hPx, dPx, mat) {
+      const geo = new THREE.BoxGeometry(wPx * PX, hPx * PX, dPx * PX);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat));
+      return mesh;
+    }
     function boxWithEdges(w, h, d, mat) {
       const geo = new THREE.BoxGeometry(w, h, d);
       const mesh = new THREE.Mesh(geo, mat);
@@ -336,21 +437,86 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
       return mesh;
     }
 
-    const armorStand = new THREE.Group();
-    scene.add(armorStand);
+    /* --- Realistic (vanilla-style) model ------------------------------ */
+    const realGroup = new THREE.Group();
+    scene.add(realGroup);
+    realGroup.visible = initialRealistic !== false;
     const joints = {};
 
-    const base = boxWithEdges(0.8, 0.07, 0.8, matWood);
-    base.position.set(0, 0.035, 0);
-    armorStand.add(base);
-    const basePole = boxWithEdges(0.1, 0.1, 0.1, matDark);
+    // Vanilla-style armor stand layout in entity pixels (1px = 1/16 block),
+    // every part occupies a strict y-range so nothing clips:
+    //   base  12x1x12        y=[0,1]
+    //   legs  2x12x2 @x=±2   y=[1,13]   (pivot/hip at y=13, body underside)
+    //   body  6x12x3         y=[13,25]
+    //   bar   10x1x2         y=[25,26]
+    //   arms  2x12x2 @x=±4.5 y=[14,26]  (pivot at bar level y=25)
+    //   head  2x6x2 stick    y=[26,32]
+
+    const base = mcBox(12, 1, 12, matStone);
+    base.position.set(0, 0.5 * PX, 0);
+    realGroup.add(base);
+
+    // Legs — plain vertical sticks tucked under the body, hips at body underside
+    const LEG_PIVOT_Y = 13;
+    [['left_leg', -2], ['right_leg', 2]].forEach(([key, xPx]) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(xPx * PX, LEG_PIVOT_Y * PX, 0);
+      const stick = mcBox(2, 12, 2, matWood); // center 6px below pivot -> y=[1,13]
+      stick.position.set(0, -6 * PX, 0);
+      pivot.add(stick);
+      realGroup.add(pivot);
+      joints[key] = pivot;
+    });
+
+    // Body: tall stretched board sitting directly on the leg tops
+    const BODY_BOTTOM = 13;
+    const body = mcBox(6, 12, 3, matWood); // y=[13,25]
+    body.position.set(0, (BODY_BOTTOM + 6) * PX, 0);
+    realGroup.add(body);
+
+    // Shoulder bar tying the two arm pivots together across the body top
+    const SHOULDER_Y = 25;
+    const shoulderBar = mcBox(11, 1, 2, matWoodDark); // y=[25,26], x=[-5.5,5.5] — flush with the arms' outer edges
+    shoulderBar.position.set(0, (SHOULDER_Y + 0.5) * PX, 0);
+    realGroup.add(shoulderBar);
+
+    // Arms — 2x12x2 sticks hanging just off the body sides (~0.5px gap)
+    [['left_arm', -4.5], ['right_arm', 4.5]].forEach(([key, xPx]) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(xPx * PX, SHOULDER_Y * PX, 0);
+      const stick = mcBox(2, 12, 2, matWood); // center 6px below pivot -> y=[14,26]
+      stick.position.set(0, -6 * PX, 0);
+      pivot.add(stick);
+      realGroup.add(pivot);
+      joints[key] = pivot;
+    });
+
+    // Head: vanilla has none — just a small stick peg where a helmet sits
+    const headPivot = new THREE.Group();
+    headPivot.position.set(0, (SHOULDER_Y + 1) * PX, 0);
+    const head = mcBox(2, 6, 2, matWood); // y=[26,32]
+    head.position.set(0, 3 * PX, 0);
+    headPivot.add(head);
+    realGroup.add(headPivot);
+    joints.head = headPivot;
+
+    /* --- Classic (original placeholder) model — restored verbatim ------ */
+    const classicGroup = new THREE.Group();
+    scene.add(classicGroup);
+    classicGroup.visible = initialRealistic === false;
+    const jointsClassic = {};
+
+    const cBase = boxWithEdges(0.8, 0.07, 0.8, matWoodC);
+    cBase.position.set(0, 0.035, 0);
+    classicGroup.add(cBase);
+    const basePole = boxWithEdges(0.1, 0.1, 0.1, matDarkC);
     basePole.position.set(0, 0.12, 0);
-    armorStand.add(basePole);
+    classicGroup.add(basePole);
 
     const hipsY = 0.62;
-    const hips = boxWithEdges(0.14, 0.06, 0.14, matDark);
+    const hips = boxWithEdges(0.14, 0.06, 0.14, matDarkC);
     hips.position.set(0, hipsY, 0);
-    armorStand.add(hips);
+    classicGroup.add(hips);
 
     [['left_leg', -0.11], ['right_leg', 0.11]].forEach(([key, x]) => {
       const pivot = new THREE.Group();
@@ -358,22 +524,22 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
       const leg = boxWithEdges(0.13, 0.58, 0.13, matBody);
       leg.position.set(0, -0.29, 0);
       pivot.add(leg);
-      const foot = boxWithEdges(0.15, 0.08, 0.15, matDark);
+      const foot = boxWithEdges(0.15, 0.08, 0.15, matDarkC);
       foot.position.set(0, -0.58, 0);
       pivot.add(foot);
-      armorStand.add(pivot);
-      joints[key] = pivot;
+      classicGroup.add(pivot);
+      jointsClassic[key] = pivot;
     });
 
     const torsoY1 = 1.14;
     const torso = boxWithEdges(0.38, torsoY1 - hipsY, 0.22, matBody);
     torso.position.set(0, (hipsY + torsoY1) / 2, 0);
-    armorStand.add(torso);
+    classicGroup.add(torso);
 
     const shoulderY = torsoY1;
-    const shoulderBar = boxWithEdges(0.6, 0.08, 0.1, matDark);
-    shoulderBar.position.set(0, shoulderY, 0);
-    armorStand.add(shoulderBar);
+    const shoulderBarC = boxWithEdges(0.6, 0.08, 0.1, matDarkC);
+    shoulderBarC.position.set(0, shoulderY, 0);
+    classicGroup.add(shoulderBarC);
 
     [['left_arm', -0.33], ['right_arm', 0.33]].forEach(([key, x]) => {
       const pivot = new THREE.Group();
@@ -381,27 +547,27 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
       const arm = boxWithEdges(0.12, 0.56, 0.12, matBody);
       arm.position.set(0, -0.28, 0);
       pivot.add(arm);
-      const hand = boxWithEdges(0.14, 0.09, 0.14, matDark);
+      const hand = boxWithEdges(0.14, 0.09, 0.14, matDarkC);
       hand.position.set(0, -0.56, 0);
       pivot.add(hand);
-      armorStand.add(pivot);
-      joints[key] = pivot;
+      classicGroup.add(pivot);
+      jointsClassic[key] = pivot;
     });
 
-    const neck = boxWithEdges(0.08, 0.1, 0.08, matDark);
+    const neck = boxWithEdges(0.08, 0.1, 0.08, matDarkC);
     neck.position.set(0, shoulderY + 0.09, 0);
-    armorStand.add(neck);
+    classicGroup.add(neck);
 
-    const headPivot = new THREE.Group();
-    headPivot.position.set(0, shoulderY + 0.14, 0);
-    const head = boxWithEdges(0.42, 0.42, 0.42, matBody);
-    head.position.set(0, 0.22, 0);
-    headPivot.add(head);
-    armorStand.add(headPivot);
-    joints.head = headPivot;
+    const headPivotC = new THREE.Group();
+    headPivotC.position.set(0, shoulderY + 0.14, 0);
+    const headC = boxWithEdges(0.42, 0.42, 0.42, matBody);
+    headC.position.set(0, 0.22, 0);
+    headPivotC.add(headC);
+    classicGroup.add(headPivotC);
+    jointsClassic.head = headPivotC;
 
     const spherical = { theta: 0.75, phi: 1.15, radius: 3.3 };
-    const target = new THREE.Vector3(0, 0.75, 0);
+    const target = new THREE.Vector3(0, initialRealistic !== false ? 1.0 : 0.75, 0);
 
     function updateCamera() {
       spherical.phi = Math.max(0.35, Math.min(Math.PI - 0.35, spherical.phi));
@@ -452,7 +618,7 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
     dom.addEventListener('pointerleave', onUp);
     dom.addEventListener('wheel', onWheel, { passive: false });
 
-    stateRef.current = { scene, camera, renderer, joints, spherical, updateCamera, grid };
+    stateRef.current = { scene, camera, renderer, joints, jointsClassic, realGroup, classicGroup, spherical, target, updateCamera, grid, keyLight: key, ground };
 
     let raf;
     function animate() {
@@ -465,15 +631,32 @@ const Viewport = forwardRef(function Viewport({ initialShowGrid, locked }, ref) 
       width = mount.clientWidth;
       height = mount.clientHeight;
       if (!width || !height) return;
+      // re-read DPR so browser page-zoom keeps the canvas crisp
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
     });
     resizeObserver.observe(mount);
 
+    // Browser zoom (Ctrl+/-) changes devicePixelRatio WITHOUT resizing the
+    // canvas element, so watch it directly or the render goes soft/blurry.
+    let lastDpr = window.devicePixelRatio || 1;
+    const onDprChange = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (dpr === lastDpr) return;
+      lastDpr = dpr;
+      renderer.setPixelRatio(dpr);
+      renderer.setSize(mount.clientWidth, mount.clientHeight);
+    };
+    const dprMedia = window.matchMedia(`(resolution: ${lastDpr}dppx)`);
+    const handleDprMedia = () => { onDprChange(); dprMedia.removeEventListener('change', handleDprMedia); };
+    dprMedia.addEventListener('change', handleDprMedia);
+
     return () => {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
+      dprMedia.removeEventListener('change', handleDprMedia);
       dom.removeEventListener('pointerdown', onDown);
       dom.removeEventListener('pointermove', onMove);
       dom.removeEventListener('pointerup', onUp);
@@ -1568,6 +1751,31 @@ input[type=number]::-webkit-inner-spin-button:hover, input[type=number]::-webkit
 .palette-empty { padding:16px; text-align:center; font-size:12.5px; color:#7a7a7a; }
 
 @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+
+.embed-app { min-height: 0; height: 100%; }
+.embed-app .embed-panel { width: 236px; flex-shrink: 0; background: #202020; display: flex; flex-direction: column; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #3a3a3c #161616; border-right: 1px solid #060606; }
+.embed-footer { flex-shrink: 0; height: 20px; display: flex; align-items: center; justify-content: center; gap: 4px; background: #181818; border-top: 1px solid #060606; font-size: 10px; color: #8a8a8a; letter-spacing: .02em; }
+.embed-footer b { color: #c9c9c9; font-weight: 600; }
+.embed-footer-link { color: #d8d8d6; font-weight: 600; text-decoration: none; }
+.embed-footer-link:hover { color: #ffffff; }
+
+/* Compact density overrides for tight embed spaces */
+.embed-app .panel-sub { display: none; }
+.embed-app .parts-list { padding: 0 6px 6px; }
+.embed-app .part-block { padding: 2px 0; }
+.embed-app .part-head { gap: 6px; padding: 4px 3px; font-size: 11.5px; }
+.embed-app .prop-list { padding: 1px 3px 3px; }
+.embed-app .prop-row { height: 22px; gap: 4px; padding-left: 14px; }
+.embed-app .prop-label { font-size: 10px; }
+.embed-app .badge-chip { font-size: 8.5px; padding: 0 3px; }
+.embed-app .prop-row .num-field { width: 50px; }
+.embed-app .num-value, .embed-app .num-input { font-size: 11px; }
+/* animation-only controls are meaningless without a timeline — hide for room
+   (but keep the reset button: it resets the axis value to 0) */
+.embed-app .stopwatch-btn, .embed-app .kf-nav-btn { display: none; }
+.embed-app .viewport-hint { display: none; }
+.embed-app .viewport-settings-btn, .embed-app .viewport-lock-btn { transform: scale(0.9); transform-origin: top left; }
+.embed-test-log { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
 `;
 
 /* ------------------------------------------------------------------ */
@@ -1620,6 +1828,161 @@ function DockZone({
 }
 
 /* ------------------------------------------------------------------ */
+/*  Embed app — viewport + pose panel only, reports every pose change  */
+/*  to the host page via window.parent.postMessage. Enabled with ?embed */
+/* ------------------------------------------------------------------ */
+
+export function EmbedApp() {
+  const [steps, setSteps] = useState([zeroStep()]);
+  const [selectedStep, setSelectedStep] = useState(0);
+  const [expanded, setExpanded] = useState({ head: true, left_arm: true, right_arm: true, left_leg: true, right_leg: true });
+  const [lockedParts, setLockedParts] = useState({});
+  const [hiddenParts, setHiddenParts] = useState({});
+  const [showGrid, setShowGrid] = useState(false);
+  const [showShadows, setShowShadows] = useState(true);
+  const [realisticModel, setRealisticModel] = useState(true);
+  const [viewportLocked, setViewportLocked] = useState(false);
+  const [viewportSettingsOpen, setViewportSettingsOpen] = useState(false);
+
+  const viewportRef = useRef(null);
+  useEffect(() => { viewportRef.current && viewportRef.current.setGridVisible(showGrid); }, [showGrid]);
+  useEffect(() => { viewportRef.current && viewportRef.current.setShadowsEnabled(showShadows); }, [showShadows]);
+  useEffect(() => { viewportRef.current && viewportRef.current.setRealisticModel(realisticModel); }, [realisticModel]);
+
+  const pose = steps[selectedStep];
+  const hiddenRef = useRef(hiddenParts);
+  hiddenRef.current = hiddenParts;
+  useEffect(() => {
+    viewportRef.current && viewportRef.current.setPose(applyVisibility(pose, hiddenParts));
+  }, [pose, hiddenParts]);
+
+  // Live reporting: fires one message per single unit of change, so dragging
+  // head.x from 10 -> 30 sends twenty {delta:+1} events as they happen.
+  const prevPoseRef = useRef(null);
+  useEffect(() => {
+    const prev = prevPoseRef.current;
+    prevPoseRef.current = JSON.parse(JSON.stringify(pose));
+    if (!prev) return; // don't report the initial mount
+    let reported = false;
+    PARTS.forEach((part) => AXES.forEach((axis) => {
+      const before = prev[part][axis];
+      const after = pose[part][axis];
+      if (before === after) return;
+      reported = true;
+      const stepDir = Math.sign(after - before) || 1;
+      for (let v = before + stepDir; stepDir > 0 ? v <= after : v >= after; v += stepDir) {
+        try {
+          window.parent.postMessage({
+            type: 'aas-pose-change',
+            source: 'advanced-armor-stands',
+            part, axis,
+            delta: stepDir,
+            value: round1(v),
+            total: round1(after),
+          }, '*');
+        } catch { /* parent may be same-origin-less (file://); ignore */ }
+      }
+    }));
+    if (reported) {
+      try {
+        window.parent.postMessage({
+          type: 'aas-pose', source: 'advanced-armor-stands',
+          pose: JSON.parse(JSON.stringify(pose)),
+          selectedStep,
+        }, '*');
+      } catch { /* ignore */ }
+    }
+  }, [pose, selectedStep]);
+
+  function onChangeAxis(part, axis, value) {
+    setSteps((s) => {
+      const next = [...s];
+      next[selectedStep] = { ...next[selectedStep], [part]: { ...next[selectedStep][part], [axis]: value } };
+      return next;
+    });
+  }
+  const toggleExpanded = (part) => setExpanded((e) => ({ ...e, [part]: !e[part] }));
+  const toggleLocked = (part) => setLockedParts((p) => ({ ...p, [part]: !p[part] }));
+  const toggleHidden = (part) => setHiddenParts((p) => ({ ...p, [part]: !p[part] }));
+  function noopHistory() {}
+
+  return (
+    <div className="aas-app embed-app">
+      <style>{CSS}</style>
+
+      <div className="body-row">
+        <div className="panel parts-panel embed-panel">
+          <PartsPanel
+            stepIndex={selectedStep}
+            steps={steps}
+            pose={pose}
+            onChangeAxis={onChangeAxis}
+            expanded={expanded}
+            toggleExpanded={toggleExpanded}
+            lockedParts={lockedParts}
+            hiddenParts={hiddenParts}
+            onDragStart={noopHistory}
+            onFlattenAxis={noopHistory}
+            onJumpChange={noopHistory}
+            onResetAxis={(part, axis) => onChangeAxis(part, axis, 0)}
+            onValueContextMenu={() => {}}
+            partOrder={[...PARTS]}
+          />
+        </div>
+
+        <div className="viewport-panel">
+          <div className="viewport-wrap" onContextMenu={(e) => e.preventDefault()}>
+            <Viewport ref={viewportRef} initialShowGrid={showGrid} initialShowShadows={showShadows} initialRealistic={realisticModel} locked={viewportLocked} />
+            <div className="viewport-settings">
+              <button type="button" className="viewport-settings-btn" onClick={() => setViewportSettingsOpen((o) => !o)} title="Viewport settings">
+                <Settings2 size={15} />
+              </button>
+              {viewportSettingsOpen && (
+                <div className="viewport-settings-menu">
+                  <button type="button" className="menu-dd-item" onClick={() => setShowGrid((g) => !g)}>
+                    <span><Grid3x3 size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Grid</span>
+                    <span>{showGrid ? 'On' : 'Off'}</span>
+                  </button>
+                  <button type="button" className="menu-dd-item" onClick={() => setShowShadows((v) => !v)}>
+                    <span><Sun size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Shadows</span>
+                    <span>{showShadows ? 'On' : 'Off'}</span>
+                  </button>
+                  <button type="button" className="menu-dd-item" onClick={() => setRealisticModel((v) => !v)}>
+                    <span><Box size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Minecraft model</span>
+                    <span>{realisticModel ? 'On' : 'Off'}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="viewport-hint">drag to orbit · scroll to zoom</div>
+            <button
+              type="button"
+              className="viewport-lock-btn"
+              onClick={() => setViewportLocked((l) => !l)}
+              title={viewportLocked ? 'Unlock camera' : 'Lock camera'}
+            >
+              {viewportLocked ? <Lock size={15} /> : <Unlock size={15} />}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="embed-footer">
+        Powered by{' '}
+        <a
+          className="embed-footer-link"
+          href="https://animate.advancedarmrostands.ir"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          AdvancedArmorStands
+        </a>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  App                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1664,7 +2027,19 @@ export default function App() {
   const [hiddenParts, setHiddenParts] = useState({});
   const [selectedDots, setSelectedDots] = useState(() => new Set());
   const [isPlaying, setIsPlaying] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(() => {
+    try {
+      const n = parseFloat(localStorage.getItem('aas-timeline-zoom'), 10);
+      if (!Number.isNaN(n) && n >= 0.5 && n <= 2.5) return round1(n);
+    } catch { /* ignore */ }
+    return 1;
+  });
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try { localStorage.setItem('aas-timeline-zoom', String(zoom)); } catch { /* ignore */ }
+    }, 300);
+    return () => clearTimeout(id);
+  }, [zoom]);
   const [copyStatus, setCopyStatus] = useState('');
   const [downloadStatus, setDownloadStatus] = useState('');
   const [showLeft, setShowLeft] = useState(true);
@@ -1674,9 +2049,23 @@ export default function App() {
   const [dragPanel, setDragPanel] = useState(null);
   const [dropZone, setDropZone] = useState(null);
   const [showGrid, setShowGrid] = useState(false);
+  const [showShadows, setShowShadows] = useState(true);
+  const [realisticModel, setRealisticModel] = useState(true);
   const [viewportLocked, setViewportLocked] = useState(false);
   const [viewportSettingsOpen, setViewportSettingsOpen] = useState(false);
-  const [timelineHeight, setTimelineHeight] = useState(360);
+  const [timelineHeight, setTimelineHeight] = useState(() => {
+    try {
+      const n = parseFloat(localStorage.getItem('aas-timeline-height'), 10);
+      if (!Number.isNaN(n) && n >= 120 && n <= 900) return Math.round(n);
+    } catch { /* ignore */ }
+    return 360;
+  });
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try { localStorage.setItem('aas-timeline-height', String(timelineHeight)); } catch { /* ignore */ }
+    }, 300);
+    return () => clearTimeout(id);
+  }, [timelineHeight]);
   const [workspace, setWorkspace] = useState('animate');
   const [openMenu, setOpenMenu] = useState(null);
   const [modal, setModal] = useState(null);
@@ -1772,6 +2161,8 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [projectOpen]);
   useEffect(() => { viewportRef.current && viewportRef.current.setGridVisible(showGrid); }, [showGrid]);
+  useEffect(() => { viewportRef.current && viewportRef.current.setShadowsEnabled(showShadows); }, [showShadows]);
+  useEffect(() => { viewportRef.current && viewportRef.current.setRealisticModel(realisticModel); }, [realisticModel]);
   const playheadRef = useRef(null);
   const rafRef = useRef(null);
 
@@ -3019,7 +3410,7 @@ export default function App() {
 
             <div className="viewport-panel">
               <div className="viewport-wrap" onContextMenu={openViewportMenu}>
-                <Viewport ref={viewportRef} initialShowGrid={showGrid} locked={viewportLocked} />
+                <Viewport ref={viewportRef} initialShowGrid={showGrid} initialShowShadows={showShadows} initialRealistic={realisticModel} locked={viewportLocked} />
                 <div className="viewport-settings">
                   <button type="button" className="viewport-settings-btn" onClick={() => setViewportSettingsOpen((o) => !o)} title="Viewport settings">
                     <Settings2 size={15} />
@@ -3029,6 +3420,14 @@ export default function App() {
                       <button type="button" className="menu-dd-item" onClick={() => setShowGrid((g) => !g)}>
                         <span><Grid3x3 size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Grid</span>
                         <span>{showGrid ? 'On' : 'Off'}</span>
+                      </button>
+                      <button type="button" className="menu-dd-item" onClick={() => setShowShadows((v) => !v)}>
+                        <span><Sun size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Shadows</span>
+                        <span>{showShadows ? 'On' : 'Off'}</span>
+                      </button>
+                      <button type="button" className="menu-dd-item" onClick={() => setRealisticModel((v) => !v)} title="Ticked = vanilla-style pixel armor stand. Unticked = the original simple model and camera framing.">
+                        <span><Box size={13} style={{ marginRight: 6, verticalAlign: -2 }} />Minecraft model</span>
+                        <span>{realisticModel ? 'On' : 'Off'}</span>
                       </button>
                     </div>
                   )}
